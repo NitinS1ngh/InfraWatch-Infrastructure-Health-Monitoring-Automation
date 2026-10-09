@@ -16,6 +16,52 @@ InfraWatch is an infrastructure health monitoring and automation system. It will
 
 The current implementation includes the monitoring engine, a local-development FastAPI integration, Prometheus scrape/rule configuration, Grafana dashboards, and Ansible deployment automation. External alert delivery remains a later step.
 
+## Architecture diagram
+
+
+flowchart TB
+    subgraph HOST["Monitored Host"]
+        SYS["System Metrics<br/>CPU · Memory · Disk · Uptime"]
+        SVC["Configured Service Checks<br/>HTTP / HTTPS"]
+        LOG["Log Parser<br/>Severity Counts"]
+    end
+
+    subgraph CORE["InfraWatch · Python"]
+        MON["Health Monitor"]
+        API["FastAPI REST API<br/>/health · /status · /logs · /metrics"]
+        POLICY["Recovery Manager<br/>Allowlist · Retry · Cooldown · Timeout"]
+        WORKER["Optional Recovery Worker<br/>Authenticated Internal Requests"]
+        HANDLER["Docker Restart Handler<br/>Exact Container Allowlist"]
+    end
+
+    subgraph OBS["Observability Stack · Docker Compose"]
+        PROM["Prometheus<br/>Scraping · Rules · Alerts"]
+        GRAF["Grafana<br/>Provisioned Dashboard"]
+    end
+
+    ANS["Ansible<br/>Configuration · Deployment · Verification"]
+
+    SYS --> MON
+    SVC --> MON
+    LOG --> MON
+    MON --> API
+    API -->|Metrics endpoint| PROM
+    PROM -->|PromQL datasource| GRAF
+    API -.->|Failure + explicit policy| POLICY
+    POLICY -.->|Only when configured| WORKER
+    WORKER -.-> HANDLER
+    ANS -.->|Manages deployment| API
+    ANS -.-> PROM
+    ANS -.-> GRAF
+
+    classDef core fill:#172554,stroke:#60a5fa,color:#fff
+    classDef obs fill:#064e3b,stroke:#34d399,color:#fff
+    classDef recovery fill:#713f12,stroke:#fbbf24,color:#fff
+    class API,MON core
+    class PROM,GRAF obs
+    class POLICY,WORKER,HANDLER recovery
+  
+
 ## Prerequisites
 
 - macOS on Apple Silicon or another Docker-compatible host.
