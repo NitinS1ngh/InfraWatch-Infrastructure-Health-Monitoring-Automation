@@ -1,0 +1,25 @@
+---
+- name: Deploy InfraWatch to an explicitly selected target
+  hosts: infrawatch_targets
+  gather_facts: false
+  vars:
+    infrawatch_mode: deploy
+    infrawatch_manage_configuration: true
+    infrawatch_start_services: true
+    infrawatch_verify_services: true
+    infrawatch_require_docker: true
+    infrawatch_validate_compose: true
+    infrawatch_build_image: true
+    infrawatch_compose_project_name: infrawatch-ansible-local
+    infrawatch_api_port: 18000
+    infrawatch_prometheus_port: 19090
+    infrawatch_grafana_port: 13000
+    infrawatch_api_health_url: http://127.0.0.1:18000/health
+    infrawatch_api_status_url: http://127.0.0.1:18000/status
+    infrawatch_prometheus_ready_url: http://127.0.0.1:19090/-/ready
+    infrawatch_grafana_health_url: http://127.0.0.1:13000/api/health
+  roles:
+    - prerequisites
+    - configuration
+    - deployment
+    - verification

@@ -1,0 +1,107 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${INFRAWATCH_BIND_ADDRESS:-127.0.0.1}:${INFRAWATCH_API_PORT:-8000}:8000"
+    environment:
+      INFRAWATCH_SERVICES_CONFIG: /app/config/services.yaml
+      INFRAWATCH_LOG_PATH: /app/logs/app.log
+      INFRAWATCH_DISK_PATH: /
+      INFRAWATCH_CPU_INTERVAL: "0.1"
+      INFRAWATCH_RECOVERY_DRY_RUN: "${INFRAWATCH_RECOVERY_DRY_RUN:-true}"
+      INFRAWATCH_DOCKER_RECOVERY_ENABLED: "${INFRAWATCH_DOCKER_RECOVERY_ENABLED:-false}"
+      INFRAWATCH_RECOVERY_ALLOWED_CONTAINERS: "${INFRAWATCH_RECOVERY_ALLOWED_CONTAINERS:-}"
+      INFRAWATCH_RECOVERY_WORKER_URL: "${INFRAWATCH_RECOVERY_WORKER_URL:-http://recovery-worker:8090}"
+      INFRAWATCH_RECOVERY_WORKER_TOKEN: "${INFRAWATCH_RECOVERY_WORKER_TOKEN:-}"
+    volumes:
+      - ./config/services.yaml:/app/config/services.yaml:ro
+      - ./logs:/app/logs
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "${INFRAWATCH_BIND_ADDRESS:-127.0.0.1}:${INFRAWATCH_PROMETHEUS_PORT:-9090}:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/alerts/infra_rules.yml:/etc/prometheus/infra_rules.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:9090/-/ready",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:11.4.0
+    env_file:
+      - .env
+    ports:
+      - "${INFRAWATCH_BIND_ADDRESS:-127.0.0.1}:${INFRAWATCH_GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:3000/api/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+  recovery-worker:
+    profiles: [recovery]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.recovery_worker"]
+    environment:
+      INFRAWATCH_RECOVERY_WORKER_TOKEN: "${INFRAWATCH_RECOVERY_WORKER_TOKEN:-}"
+      INFRAWATCH_RECOVERY_ALLOWED_CONTAINERS: "${INFRAWATCH_RECOVERY_ALLOWED_CONTAINERS:-}"
+      INFRAWATCH_RECOVERY_WORKER_PORT: "8090"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,1 @@
+"""InfraWatch application package."""

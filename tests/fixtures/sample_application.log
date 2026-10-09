@@ -1,0 +1,5 @@
+2026-10-09T10:00:00Z DEBUG test fixture: starting parser test
+2026-10-09T10:00:01Z INFO test fixture: worker ready
+2026-10-09T10:00:02Z WARNING test fixture: retrying operation
+2026-10-09T10:00:03Z ERROR test fixture: operation failed
+2026-10-09T10:00:04Z CRITICAL test fixture: unrecoverable test condition

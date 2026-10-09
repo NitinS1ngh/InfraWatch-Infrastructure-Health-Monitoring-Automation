@@ -1,0 +1,63 @@
+---
+- name: Validate the requested execution mode
+  ansible.builtin.assert:
+    that:
+      - infrawatch_mode in ['validate', 'deploy', 'verify']
+    fail_msg: "infrawatch_mode must be validate, deploy, or verify."
+
+- name: Inspect required project files on the Ansible controller
+  ansible.builtin.stat:
+    path: "{{ infrawatch_project_dir }}/{{ item }}"
+  loop:
+    - Dockerfile
+    - docker-compose.yml
+    - config/services.yaml
+    - config/prometheus/prometheus.yml
+    - config/alerts/infra_rules.yml
+    - config/grafana/provisioning
+    - config/grafana/dashboards
+  delegate_to: localhost
+  become: false
+  register: infrawatch_project_files
+  run_once: true
+
+- name: Fail when a required project file or directory is missing
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: "Required InfraWatch path is missing: {{ item.item }}"
+  loop: "{{ infrawatch_project_files.results }}"
+  run_once: true
+
+- name: Check Docker availability without changing the host
+  ansible.builtin.command: docker --version
+  register: infrawatch_docker_check
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Check Docker Compose plugin availability without changing the host
+  ansible.builtin.command: docker compose version
+  register: infrawatch_compose_check
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: Require Docker for deployment mode
+  ansible.builtin.assert:
+    that:
+      - infrawatch_docker_check.rc == 0
+      - infrawatch_compose_check.rc == 0
+    fail_msg: >-
+      Docker and the Docker Compose plugin are required for deployment. Install
+      Docker Desktop or Docker Engine with Compose, then rerun deploy.yml.
+  when: infrawatch_require_docker | bool
+
+- name: Report that validation will stop before Docker operations
+  ansible.builtin.debug:
+    msg: >-
+      Docker or Docker Compose is unavailable; validation completed without
+      attempting deployment. No services are reported as started.
+  when:
+    - not infrawatch_require_docker | bool
+    - infrawatch_docker_check.rc | default(1) != 0 or infrawatch_compose_check.rc | default(1) != 0

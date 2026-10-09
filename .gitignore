@@ -1,0 +1,40 @@
+# Python environments
+.venv/
+venv/
+env/
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime logs and local data
+logs/*
+!logs/.gitkeep
+*.log
+
+# Build and distribution artifacts
+build/
+dist/
+*.egg-info/
+
+# macOS and editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Local Ansible virtual environment
+.venv-ansible/
+!tests/fixtures/*.log

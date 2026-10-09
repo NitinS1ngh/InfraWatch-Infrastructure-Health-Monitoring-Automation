@@ -1,0 +1,19 @@
+# Local-only example configuration. The API need not be running for this file to exist.
+defaults:
+  timeout_seconds: 2.0
+  expected_status_codes: [200, 201, 202, 204]
+
+services:
+  - name: local-infra-watch-api
+    url: http://127.0.0.1:8000/
+    required: true
+    recovery:
+      enabled: false
+      action: none
+      max_attempts: 1
+      cooldown_seconds: 300
+      timeout_seconds: 5
+      target_container: infrawatch-api-1
+
+# Add additional entries with name, url, and optional required, timeout_seconds,
+# and expected_status_codes fields. Only HTTP and HTTPS URLs are supported.

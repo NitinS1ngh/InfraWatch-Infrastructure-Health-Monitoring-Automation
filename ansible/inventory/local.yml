@@ -1,0 +1,13 @@
+all:
+  children:
+    infrawatch_targets:
+      hosts:
+        local:
+          ansible_connection: local
+          ansible_host: 127.0.0.1
+          ansible_become: false
+  vars:
+    infrawatch_target_mode: local
+    infrawatch_project_dir: "{{ inventory_dir }}/../.."
+    infrawatch_deploy_dir: /tmp/infrawatch
+    ansible_become: false

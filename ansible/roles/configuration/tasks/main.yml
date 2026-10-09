@@ -1,0 +1,47 @@
+---
+- name: Create the deployment directory
+  ansible.builtin.file:
+    path: "{{ infrawatch_deploy_dir }}"
+    state: directory
+    mode: "0750"
+  when: infrawatch_manage_configuration | bool
+
+- name: Copy the application source required by the image build
+  ansible.builtin.copy:
+    src: "{{ infrawatch_project_dir }}/app/"
+    dest: "{{ infrawatch_deploy_dir }}/app/"
+    mode: preserve
+  when: infrawatch_manage_configuration | bool
+
+- name: Copy the monitoring and Grafana configuration
+  ansible.builtin.copy:
+    src: "{{ infrawatch_project_dir }}/config/"
+    dest: "{{ infrawatch_deploy_dir }}/config/"
+    mode: preserve
+  when: infrawatch_manage_configuration | bool
+
+- name: Copy deployment manifests and dependency metadata
+  ansible.builtin.copy:
+    src: "{{ infrawatch_project_dir }}/{{ item }}"
+    dest: "{{ infrawatch_deploy_dir }}/{{ item }}"
+    mode: "0640"
+  loop:
+    - Dockerfile
+    - docker-compose.yml
+    - requirements.txt
+    - .env.example
+  when: infrawatch_manage_configuration | bool
+
+- name: Create the runtime log directory
+  ansible.builtin.file:
+    path: "{{ infrawatch_deploy_dir }}/logs"
+    state: directory
+    mode: "0750"
+  when: infrawatch_manage_configuration | bool
+
+- name: Explain that secrets are supplied separately
+  ansible.builtin.debug:
+    msg: >-
+      .env is intentionally not copied. Create it securely on the deployment
+      target from .env.example before starting Grafana.
+  when: infrawatch_manage_configuration | bool

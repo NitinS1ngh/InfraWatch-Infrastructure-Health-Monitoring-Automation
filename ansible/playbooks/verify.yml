@@ -1,0 +1,9 @@
+---
+- name: Verify an already running InfraWatch deployment
+  hosts: infrawatch_targets
+  gather_facts: false
+  vars:
+    infrawatch_mode: verify
+    infrawatch_verify_services: true
+  roles:
+    - verification

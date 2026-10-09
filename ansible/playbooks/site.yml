@@ -1,0 +1,16 @@
+---
+- name: Validate InfraWatch deployment prerequisites
+  hosts: infrawatch_targets
+  gather_facts: false
+  vars:
+    infrawatch_mode: validate
+    infrawatch_manage_configuration: false
+    infrawatch_start_services: false
+    infrawatch_verify_services: false
+    infrawatch_require_docker: false
+    infrawatch_validate_compose: false
+  roles:
+    - prerequisites
+    - configuration
+    - deployment
+    - verification

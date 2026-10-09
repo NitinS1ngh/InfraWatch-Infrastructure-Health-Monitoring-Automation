@@ -1,0 +1,93 @@
+---
+- name: Verify API liveness with bounded retries
+  ansible.builtin.uri:
+    url: "{{ infrawatch_api_health_url }}"
+    method: GET
+    status_code: 200
+    timeout: 5
+    return_content: false
+  check_mode: false
+  register: infrawatch_api_health
+  failed_when: false
+  until: infrawatch_api_health.status | default(0) == 200
+  retries: "{{ infrawatch_verify_retries }}"
+  delay: "{{ infrawatch_verify_delay }}"
+  when: infrawatch_verify_services | bool
+
+- name: Fail when the API is unreachable
+  ansible.builtin.assert:
+    that:
+      - infrawatch_api_health.status | default(0) == 200
+    fail_msg: "InfraWatch API liveness check failed: {{ infrawatch_api_health.msg | default('no response') }}"
+  when: infrawatch_verify_services | bool
+
+- name: Check monitoring status separately from API liveness
+  ansible.builtin.uri:
+    url: "{{ infrawatch_api_status_url }}"
+    method: GET
+    status_code: [200, 503]
+    timeout: 5
+    return_content: true
+  check_mode: false
+  register: infrawatch_api_status
+  failed_when: false
+  until: infrawatch_api_status.status | default(0) in [200, 503]
+  retries: "{{ infrawatch_verify_retries }}"
+  delay: "{{ infrawatch_verify_delay }}"
+  when: infrawatch_verify_services | bool
+
+- name: Report API monitoring status without confusing it with liveness
+  ansible.builtin.debug:
+    msg: "API is reachable; /status returned HTTP {{ infrawatch_api_status.status }}."
+  when:
+    - infrawatch_verify_services | bool
+    - infrawatch_api_status.status | default(0) in [200, 503]
+
+- name: Verify Prometheus readiness with bounded retries
+  ansible.builtin.uri:
+    url: "{{ infrawatch_prometheus_ready_url }}"
+    method: GET
+    status_code: 200
+    timeout: 5
+    return_content: false
+  check_mode: false
+  register: infrawatch_prometheus_health
+  failed_when: false
+  until: infrawatch_prometheus_health.status | default(0) == 200
+  retries: "{{ infrawatch_verify_retries }}"
+  delay: "{{ infrawatch_verify_delay }}"
+  when: infrawatch_verify_services | bool
+
+- name: Verify Grafana readiness with bounded retries
+  ansible.builtin.uri:
+    url: "{{ infrawatch_grafana_health_url }}"
+    method: GET
+    status_code: 200
+    timeout: 5
+    return_content: false
+  check_mode: false
+  register: infrawatch_grafana_health
+  failed_when: false
+  until: infrawatch_grafana_health.status | default(0) == 200
+  retries: "{{ infrawatch_verify_retries }}"
+  delay: "{{ infrawatch_verify_delay }}"
+  when: infrawatch_verify_services | bool
+
+- name: Fail when Prometheus is not ready
+  ansible.builtin.assert:
+    that:
+      - infrawatch_prometheus_health.status | default(0) == 200
+    fail_msg: "Prometheus readiness check failed."
+  when: infrawatch_verify_services | bool
+
+- name: Fail when Grafana is not ready
+  ansible.builtin.assert:
+    that:
+      - infrawatch_grafana_health.status | default(0) == 200
+    fail_msg: "Grafana readiness check failed."
+  when: infrawatch_verify_services | bool
+
+- name: Report that verification was skipped
+  ansible.builtin.debug:
+    msg: "Post-deployment verification was not requested."
+  when: not infrawatch_verify_services | bool

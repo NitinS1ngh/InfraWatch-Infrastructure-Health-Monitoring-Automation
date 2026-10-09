@@ -1,0 +1,58 @@
+groups:
+  - name: infrawatch-recordings
+    interval: 15s
+    rules:
+      - record: infrawatch:cpu_utilization_percent
+        expr: infrawatch_cpu_utilization_percent
+      - record: infrawatch:memory_utilization_percent
+        expr: infrawatch_memory_utilization_percent
+      - record: infrawatch:disk_utilization_percent
+        expr: infrawatch_disk_utilization_percent
+
+  - name: infrawatch-alerts
+    interval: 15s
+    rules:
+      - alert: InfraWatchAPITargetUnavailable
+        expr: up{job="infrawatch-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: InfraWatch API target is unavailable
+          description: Prometheus cannot scrape the InfraWatch API metrics endpoint.
+
+      - alert: InfraWatchRequiredServiceDown
+        expr: infrawatch_service_availability{required="true"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: A required monitored service is down
+          description: A required service reported unavailable through the InfraWatch API.
+
+      - alert: InfraWatchHighCPUUtilization
+        expr: infrawatch_cpu_utilization_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: InfraWatch host CPU utilization is high
+          description: Host CPU utilization has exceeded 85 percent for 5 minutes.
+
+      - alert: InfraWatchHighMemoryUtilization
+        expr: infrawatch_memory_utilization_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: InfraWatch host memory utilization is high
+          description: Host memory utilization has exceeded 85 percent for 5 minutes.
+
+      - alert: InfraWatchHighDiskUtilization
+        expr: infrawatch_disk_utilization_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: InfraWatch disk utilization is high
+          description: Disk utilization has exceeded 85 percent for 5 minutes.

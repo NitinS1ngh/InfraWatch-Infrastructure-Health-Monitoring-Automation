@@ -1,0 +1,124 @@
+---
+- name: Check for the target environment file before startup
+  ansible.builtin.stat:
+    path: "{{ infrawatch_deploy_dir }}/.env"
+  register: infrawatch_env_file
+  when: infrawatch_start_services | bool
+
+- name: Require a separately managed environment file for startup
+  ansible.builtin.assert:
+    that:
+      - infrawatch_env_file.stat.exists
+      - infrawatch_env_file.stat.isreg
+    fail_msg: >-
+      {{ infrawatch_deploy_dir }}/.env is required to start Grafana. Create it
+      from .env.example and keep credentials out of source control.
+  when: infrawatch_start_services | bool
+
+- name: Read deployment environment metadata without exposing values
+  ansible.builtin.slurp:
+    src: "{{ infrawatch_deploy_dir }}/.env"
+  register: infrawatch_env_contents
+  no_log: true
+  when: infrawatch_start_services | bool
+
+- name: Reject placeholder secrets and enabled recovery in normal deployment
+  ansible.builtin.assert:
+    that:
+      - "'change-me' not in (infrawatch_env_contents.content | b64decode)"
+      - "'replace-with' not in (infrawatch_env_contents.content | b64decode)"
+      - "'INFRAWATCH_RECOVERY_DRY_RUN=true' in (infrawatch_env_contents.content | b64decode)"
+      - "'INFRAWATCH_DOCKER_RECOVERY_ENABLED=false' in (infrawatch_env_contents.content | b64decode)"
+    fail_msg: >-
+      Deployment .env contains placeholder credentials or enables recovery.
+      Supply real secrets and keep recovery disabled for the standard deployment.
+  no_log: true
+  when: infrawatch_start_services | bool
+
+- name: Validate the Compose configuration before deployment
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-name
+      - "{{ infrawatch_compose_project_name }}"
+      - -f
+      - docker-compose.yml
+      - config
+      - --quiet
+  args:
+    chdir: "{{ infrawatch_deploy_dir }}"
+  check_mode: false
+  register: infrawatch_compose_validation
+  environment:
+    INFRAWATCH_BIND_ADDRESS: "{{ infrawatch_bind_address }}"
+    INFRAWATCH_API_PORT: "{{ infrawatch_api_port }}"
+    INFRAWATCH_PROMETHEUS_PORT: "{{ infrawatch_prometheus_port }}"
+    INFRAWATCH_GRAFANA_PORT: "{{ infrawatch_grafana_port }}"
+  changed_when: false
+  when:
+    - infrawatch_validate_compose | bool
+    - infrawatch_compose_check.rc == 0
+
+- name: Fail when Compose validation fails
+  ansible.builtin.assert:
+    that:
+      - infrawatch_compose_validation.rc == 0
+    fail_msg: "Docker Compose configuration validation failed before startup."
+  when:
+    - infrawatch_validate_compose | bool
+    - infrawatch_compose_check.rc == 0
+
+- name: Start InfraWatch services and rebuild the image when requested
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-name
+      - "{{ infrawatch_compose_project_name }}"
+      - -f
+      - docker-compose.yml
+      - up
+      - --build
+      - -d
+  args:
+    chdir: "{{ infrawatch_deploy_dir }}"
+  register: infrawatch_start_result
+  changed_when: true
+  environment:
+    INFRAWATCH_BIND_ADDRESS: "{{ infrawatch_bind_address }}"
+    INFRAWATCH_API_PORT: "{{ infrawatch_api_port }}"
+    INFRAWATCH_PROMETHEUS_PORT: "{{ infrawatch_prometheus_port }}"
+    INFRAWATCH_GRAFANA_PORT: "{{ infrawatch_grafana_port }}"
+  when:
+    - infrawatch_start_services | bool
+    - infrawatch_build_image | bool
+
+- name: Start InfraWatch services without rebuilding when requested
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-name
+      - "{{ infrawatch_compose_project_name }}"
+      - -f
+      - docker-compose.yml
+      - up
+      - -d
+  args:
+    chdir: "{{ infrawatch_deploy_dir }}"
+  register: infrawatch_start_result
+  changed_when: true
+  environment:
+    INFRAWATCH_BIND_ADDRESS: "{{ infrawatch_bind_address }}"
+    INFRAWATCH_API_PORT: "{{ infrawatch_api_port }}"
+    INFRAWATCH_PROMETHEUS_PORT: "{{ infrawatch_prometheus_port }}"
+    INFRAWATCH_GRAFANA_PORT: "{{ infrawatch_grafana_port }}"
+  when:
+    - infrawatch_start_services | bool
+    - not infrawatch_build_image | bool
+
+- name: Report validation-only mode without claiming deployment
+  ansible.builtin.debug:
+    msg: "Configuration validation mode selected; no services were started."
+  when: not infrawatch_start_services | bool
