@@ -1,62 +1,195 @@
-# InfraWatch
+# InfraWatch — Infrastructure Health Monitoring & Automation
 
-InfraWatch is an infrastructure health monitoring and automation system. It will provide a FastAPI REST API, collect operational metrics with Prometheus, present dashboards in Grafana, and use Ansible for configuration management and deployment.
+A modular **Python + FastAPI** infrastructure monitoring system with **Prometheus** metric collection, **Grafana** dashboards, opt-in **service recovery**, and **Ansible** deployment automation. Built as a DevOps/SRE portfolio project demonstrating production-aware engineering practices: safety-gated recovery, loopback-only bindings, credential redaction, non-root containers, and deterministic test coverage.
 
-## Planned architecture
+---
 
-- `app/api/`: REST API routes and request/response models.
-- `app/monitoring/`: system and service metric collection.
-- `app/log_parser/`: log ingestion and parsing components.
-- `app/core/`: shared configuration and application services.
-- `config/`: Prometheus, Grafana, and alerting configuration.
-- `ansible/`: inventories, playbooks, and reusable roles.
-- `tests/`: pytest tests.
-- `scripts/`: local development and operational helpers.
-- `logs/`: local runtime logs; generated contents are ignored by Git.
+## Key Features
 
-The current implementation includes the monitoring engine, a local-development FastAPI integration, Prometheus scrape/rule configuration, Grafana dashboards, and Ansible deployment automation. External alert delivery remains a later step.
+| Area | What is implemented |
+|---|---|
+| **System metrics** | CPU, memory, disk utilization, and uptime via `psutil` |
+| **Service health** | Bounded HTTP/HTTPS checks with configurable timeouts and expected-status-code lists |
+| **Log parsing** | Windowed severity-count extraction (up to 1,000 lines) without evaluating file contents |
+| **Health aggregation** | Three-tier status: `HEALTHY` / `DEGRADED` / `UNHEALTHY`; required-service failures are always `UNHEALTHY` |
+| **FastAPI REST API** | `/health`, `/status`, `/logs`, `/metrics`, and `/docs` |
+| **Prometheus export** | Text-format metrics via `prometheus_client`; scraped every 15 s |
+| **Grafana dashboards** | Auto-provisioned dashboard covering CPU, memory, disk, uptime, service availability, response time, log severity counts, and active alerts |
+| **Alert rules** | Five Prometheus alerting rules plus three recording rules |
+| **Safe recovery** | Opt-in, policy-driven recovery with dry-run default, retry limits, cooldown, allowlist, and timeout |
+| **Docker recovery** | Optional `DockerContainerRestartHandler` via Docker SDK; Docker socket isolated to a separate `recovery-worker` sidecar |
+| **Ansible automation** | Four roles: prerequisites, configuration, deployment, verification |
+| **Test suite** | 76 pytest tests covering unit, integration, structural, and loopback HTTP sequences |
 
+---
 
-## Prerequisites
+## Technology Stack
 
-- macOS on Apple Silicon or another Docker-compatible host.
-- Python 3.9 or newer.
-- Docker Desktop, when using the containerized API.
-- Git.
+| Layer | Technology |
+|---|---|
+| Language | Python 3.12 |
+| API framework | FastAPI 0.115 + Uvicorn 0.34 |
+| Metrics export | prometheus-client 0.21 |
+| System metrics | psutil 6.1 |
+| Config parsing | PyYAML 6.0 |
+| Containerization | Docker (python:3.12-slim base) + Docker Compose v2 |
+| Monitoring stack | Prometheus v2.55.1 + Grafana v11.4.0 |
+| Docker recovery | Docker SDK for Python 7.1 |
+| Deployment automation | Ansible Core 2.15+ |
+| Testing | pytest 8.3 + httpx 0.28 |
 
-## Initial setup
+---
 
-From the project root:
+## Architecture
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-cp .env.example .env
+```mermaid
+flowchart TD
+    subgraph Collectors["Monitoring Collectors (app/monitoring/)"]
+        SM["SystemMetricsCollector\n(psutil)"]
+        SC["ServiceChecker\n(stdlib urllib)"]
+        LP["LogParser\n(file read)"]
+    end
+
+    HM["HealthMonitor\n(app/monitoring/health_monitor.py)"]
+    RM["RecoveryManager\n(opt-in, dry_run=true by default)"]
+
+    subgraph API["FastAPI (app/main.py)"]
+        H["/health"]
+        ST["/status"]
+        LG["/logs"]
+        MT["/metrics (Prometheus text)"]
+    end
+
+    subgraph Compose["Docker Compose stack"]
+        PROM["Prometheus :9090\nscrapes /metrics every 15s"]
+        GRF["Grafana :3000\nauto-provisioned dashboard"]
+        RW["recovery-worker sidecar\n(Docker profile, optional)\nmounts /var/run/docker.sock"]
+    end
+
+    subgraph Ansible["Ansible (deployment only)"]
+        ANS["prerequisites -> configuration\n-> deployment -> verification"]
+    end
+
+    SM --> HM
+    SC --> HM
+    LP --> HM
+    HM --> RM
+    HM --> API
+    MT --> PROM
+    PROM --> GRF
+    API -->|"worker REST call\n(X-InfraWatch-Token)"| RW
+    RW -->|"Docker SDK"| DOCKER[("Docker Engine")]
+    Ansible -.->|"copies files, starts Compose\nnot in request path"| Compose
 ```
 
-The `.env` file contains development-only defaults and must not be committed.
+> **Note:** Ansible is used only for deployment. It is not part of the runtime request path.
+> The `recovery-worker` sidecar is opt-in (Docker Compose profile `recovery`) and is not started by default.
 
-## Run the foundation API
+---
 
-With the virtual environment active:
+## Monitoring Workflow
 
-```bash
-uvicorn app.main:app --reload
+```mermaid
+sequenceDiagram
+    participant P as Prometheus
+    participant A as FastAPI /metrics
+    participant HM as HealthMonitor
+    participant SM as SystemMetricsCollector
+    participant SC as ServiceChecker
+    participant LP as LogParser
+
+    P->>A: GET /metrics every 15 s
+    A->>HM: collect()
+    HM->>SM: collect()
+    SM-->>HM: SystemMetrics cpu mem disk uptime
+    HM->>SC: check_all()
+    SC-->>HM: list of ServiceHealth UP or DOWN per service
+    HM->>LP: parse()
+    LP-->>HM: LogSummary severity counts
+    HM-->>A: unified report dict
+    A-->>P: Prometheus text format
+    P->>P: evaluate alert rules every 15 s
 ```
 
-The API is intended for local development only. It has no authentication yet and must not be exposed publicly without suitable access controls.
+---
 
-Available endpoints:
+## Recovery Workflow
 
-- `GET /health`: process liveness check; does not run monitoring checks.
-- `GET /status`: complete coordinator report. Returns `200` for `HEALTHY` or `DEGRADED`, and `503` for `UNHEALTHY`.
-- `GET /logs?limit=20`: bounded severity counts and recent error/critical entries. The limit is restricted to 1-100 and the log path comes only from local configuration.
-- `GET /metrics`: Prometheus text-format metrics generated from the same coordinator report used by `/status`.
-- `GET /docs`: generated local API documentation.
+```mermaid
+flowchart TD
+    A["Service reported DOWN"] --> B{"recovery.enabled?"}
+    B -->|No| C["DISABLED — logged, returned in report"]
+    B -->|Yes| D{"action == none?"}
+    D -->|Yes| C
+    D -->|No| E{"Retry limit reached?"}
+    E -->|Yes| F["RETRY_LIMIT — logged"]
+    E -->|No| G{"Cooldown active?"}
+    G -->|Yes| H["COOLDOWN — logged"]
+    G -->|No| I{"dry_run == true?"}
+    I -->|Yes| J["DRY_RUN — action not executed"]
+    I -->|No| K{"Handler in allowlist?"}
+    K -->|No| L["FAILED — not allowlisted"]
+    K -->|Yes| M["Execute handler in ThreadPoolExecutor\nwith bounded timeout"]
+    M --> N{"Succeeded within timeout?"}
+    N -->|Timeout| O["FAILED — timed out"]
+    N -->|Exception| P["FAILED — exception logged"]
+    N -->|True| Q["SUCCEEDED — attempt counter reset"]
+    N -->|False| R["FAILED — handler reported failure"]
+```
 
-Example requests:
+**Safety controls verified in source:**
+
+- `dry_run=true` by default (`INFRAWATCH_RECOVERY_DRY_RUN=true` in `.env.example`)
+- `INFRAWATCH_DOCKER_RECOVERY_ENABLED=false` by default
+- Docker socket is **not** mounted in the API container; only the opt-in `recovery-worker` sidecar mounts it
+- `action` selects an injected handler by name — no shell commands or arbitrary executables
+- Container name must appear in `INFRAWATCH_RECOVERY_ALLOWED_CONTAINERS` before a restart is issued
+- `RecoveryWorker` rejects tokens shorter than 16 characters or matching known placeholder prefixes
+
+---
+
+## Grafana Dashboard
+
+![InfraWatch Grafana Overview dashboard showing CPU, memory, disk, uptime, service availability, and active alerts panels](docs/images/grafana-overview.png)
+
+### Dashboard panels
+
+| Panel | Metric / Query |
+|---|---|
+| CPU Utilization | `infrawatch_cpu_utilization_percent` |
+| Memory Utilization | `infrawatch_memory_utilization_percent` |
+| Disk Utilization | `infrawatch_disk_utilization_percent` |
+| System Uptime | `infrawatch_system_uptime_seconds` |
+| Monitored Service Availability | `infrawatch_service_availability` |
+| Service Response Time | `infrawatch_service_response_time_milliseconds` |
+| Application Error & Critical Logs | `infrawatch_log_severity_count{severity=~"error\|critical"}` |
+| Prometheus Scrape Health | `up{job="infrawatch-api"}` |
+| Active Prometheus Alerts | `ALERTS{alertstate="firing"}` |
+
+> **Dashboard note — uptime panel colour:** The *System Uptime* `stat` panel (id 4) has `unit: "s"` but its `thresholds.steps` array contains only a red base step for `null` values with no green step at any positive value. When Grafana renders a live uptime reading, it may display the panel in red because no threshold turns the colour green. This is a configuration gap in the dashboard JSON — it does not affect metric collection or alerting. A fix would add `{ "color": "green", "value": 0 }` to the uptime panel's `thresholds.steps` array. The application and dashboard have not been modified automatically.
+>
+> **Disk graph note:** The nearly flat disk-utilization graph in the screenshot is expected on a development host. `infrawatch_disk_utilization_percent` is a Gauge; disk usage changes slowly, so a flat line at the actual utilization percentage is correct behaviour.
+
+---
+
+## Prometheus Targets
+
+![Prometheus Targets page showing the infrawatch-api target as UP](docs/images/prometheus-targets.png)
+
+---
+
+## API Endpoints
+
+| Method | Path | Description | HTTP codes |
+|---|---|---|---|
+| `GET` | `/health` | Process liveness — no monitoring checks run | `200` |
+| `GET` | `/status` | Full coordinator report | `200` (HEALTHY/DEGRADED), `503` (UNHEALTHY) |
+| `GET` | `/logs?limit=N` | Severity counts + recent ERROR/CRITICAL entries (limit 1–100) | `200`, `503` |
+| `GET` | `/metrics` | Prometheus text-format metrics | `200` |
+| `GET` | `/docs` | Auto-generated OpenAPI documentation | `200` |
+| `GET` | `/` | Minimal service status response | `200` |
+
+Example requests (local development):
 
 ```bash
 curl http://127.0.0.1:8000/health
@@ -65,297 +198,302 @@ curl 'http://127.0.0.1:8000/logs?limit=10'
 curl http://127.0.0.1:8000/metrics
 ```
 
-The API reads service and log locations from `INFRAWATCH_SERVICES_CONFIG`, `INFRAWATCH_LOG_PATH`, `INFRAWATCH_DISK_PATH`, and `INFRAWATCH_CPU_INTERVAL`. Relative paths are resolved from the project root. The shared monitoring components are initialized once when the application is created.
+---
 
-## Run with Docker Compose
+## Exported Metrics
 
-Docker Desktop is required on macOS, including Apple Silicon Macs. Docker Compose v2 is included with current Docker Desktop installations. The Compose stack contains the InfraWatch API, Prometheus, and Grafana in this step.
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `infrawatch_cpu_utilization_percent` | Gauge | — | Host CPU utilization % |
+| `infrawatch_memory_utilization_percent` | Gauge | — | Host memory utilization % |
+| `infrawatch_disk_utilization_percent` | Gauge | — | Configured disk utilization % |
+| `infrawatch_system_uptime_seconds` | Gauge | — | System uptime in seconds |
+| `infrawatch_service_availability` | Gauge | `service`, `required` | 1 = UP, 0 = DOWN |
+| `infrawatch_service_response_time_milliseconds` | Gauge | `service` | Latest HTTP response time |
+| `infrawatch_log_severity_count` | Gauge | `severity` | Log entries per severity level |
 
-Build and start the API:
+---
 
-```bash
-docker compose up --build
-```
+## Alert Rules
 
-Run it in the background:
+Rules are evaluated every 15 s. Source: [`config/alerts/infra_rules.yml`](config/alerts/infra_rules.yml)
 
-```bash
-docker compose up --build -d
-```
+| Alert | Expression | `for` | Severity |
+|---|---|---|---|
+| `InfraWatchAPITargetUnavailable` | `up{job="infrawatch-api"} == 0` | 2 m | critical |
+| `InfraWatchRequiredServiceDown` | `infrawatch_service_availability{required="true"} == 0` | 2 m | critical |
+| `InfraWatchHighCPUUtilization` | `infrawatch_cpu_utilization_percent > 85` | 5 m | warning |
+| `InfraWatchHighMemoryUtilization` | `infrawatch_memory_utilization_percent > 85` | 5 m | warning |
+| `InfraWatchHighDiskUtilization` | `infrawatch_disk_utilization_percent > 85` | 5 m | warning |
 
-Inspect service health and container logs:
+Three recording rules (`infrawatch:cpu_utilization_percent`, `infrawatch:memory_utilization_percent`, `infrawatch:disk_utilization_percent`) are also defined for efficient re-use.
 
-```bash
-docker compose ps
-docker compose logs -f api
-```
+---
 
-The API health check calls `GET /health`. The API is published only on `127.0.0.1:8000`, so it is not exposed on every host network interface by default. Stop and remove the container with:
-
-```bash
-docker compose down
-```
-
-Compose sets container-specific paths: `/app/config/services.yaml` is mounted read-only from [`config/services.yaml`](config/services.yaml), and `/app/logs` is mounted from the local `logs/` directory. Local development resolves relative configuration paths from the project root instead. The optional `logs/app.log` file may be absent; `/health` remains available and `/logs` reports a clear read failure.
-
-The container runs as the unprivileged `infrawatch` user, does not use host networking or the Docker socket, and contains no credentials. This API is still intended for local development and should not be exposed publicly without authentication and access controls.
-
-External alert delivery is intentionally not configured yet.
-
-## Prometheus
-
-The Compose stack runs Prometheus beside the API on the private Compose network. Prometheus scrapes the API at `http://api:8000/metrics`; it must use the service DNS name `api`, not `localhost`, from inside the Prometheus container.
-
-- Scrape configuration: [`config/prometheus/prometheus.yml`](config/prometheus/prometheus.yml)
-- Recording and alerting rules: [`config/alerts/infra_rules.yml`](config/alerts/infra_rules.yml)
-- Persistent data volume: `prometheus_data`
-- Local Prometheus UI: `http://127.0.0.1:9090`
-
-Start the API and Prometheus together:
-
-```bash
-docker compose up --build -d
-```
-
-Open the Prometheus UI, then inspect `Status > Targets` for the `infrawatch-api` target and `Alerts` for loaded rule state. The raw endpoints are also useful during development:
-
-```bash
-curl http://127.0.0.1:9090/-/ready
-curl http://127.0.0.1:9090/api/v1/targets
-curl http://127.0.0.1:9090/api/v1/rules
-```
-
-Example PromQL queries based on the metrics emitted by the existing API exporter:
-
-```promql
-infrawatch_cpu_utilization_percent
-infrawatch_memory_utilization_percent
-infrawatch_disk_utilization_percent
-infrawatch_service_availability{required="true"}
-up{job="infrawatch-api"}
-```
-
-Stop the stack when finished:
-
-```bash
-docker compose down
-```
-
-The YAML configuration and rule expressions are structurally tested locally. Runtime scrape health, rule loading, and Prometheus ingestion require Docker and Prometheus to be available; they are not claimed as verified when those tools are unavailable.
-
-## Grafana
-
-Grafana provides the local dashboard layer over Prometheus. It uses the internal datasource URL `http://prometheus:9090`, persists its state in the named `grafana_data` volume, and is published locally at:
+## Project Structure
 
 ```text
-http://127.0.0.1:3000
+InfraWatch/
+├── app/
+│   ├── main.py                    # FastAPI application factory
+│   ├── api/
+│   │   ├── routes.py              # /health /status /logs /metrics endpoints
+│   │   └── metrics.py             # PrometheusMetrics exporter
+│   ├── core/
+│   │   └── monitoring.py          # Build shared monitor from environment config
+│   ├── monitoring/
+│   │   ├── health_monitor.py      # Coordinator — aggregates all sources
+│   │   ├── system_metrics.py      # psutil CPU/memory/disk/uptime collector
+│   │   ├── service_checker.py     # HTTP/HTTPS service checks + YAML loader
+│   │   ├── recovery.py            # RecoveryManager with dry-run and retry guards
+│   │   └── docker_recovery.py     # DockerContainerRestartHandler + worker client
+│   ├── log_parser/
+│   │   └── log_parser.py          # Windowed log severity counter
+│   └── recovery_worker.py         # Opt-in sidecar with Docker socket access
+├── config/
+│   ├── services.yaml              # Monitored service definitions
+│   ├── prometheus/
+│   │   └── prometheus.yml         # Scrape config (infrawatch-api job)
+│   ├── alerts/
+│   │   └── infra_rules.yml        # 5 alert rules + 3 recording rules
+│   └── grafana/
+│       ├── provisioning/          # Auto-provisioned datasource + dashboard
+│       └── dashboards/
+│           └── infrawatch-overview.json
+├── ansible/
+│   ├── ansible.cfg
+│   ├── inventory/local.yml        # Loopback-only default inventory
+│   ├── playbooks/
+│   │   ├── site.yml               # Safe validation (no service start)
+│   │   ├── deploy.yml             # Explicit deployment to isolated ports
+│   │   └── verify.yml             # Liveness verification only
+│   └── roles/
+│       ├── prerequisites/         # Check source files and Docker availability
+│       ├── configuration/         # Copy files to deployment directory
+│       ├── deployment/            # Start services (only when requested)
+│       └── verification/          # Bounded API/Prometheus/Grafana liveness checks
+├── tests/                         # 76 pytest tests (unit, integration, structural)
+├── scripts/
+│   ├── run_monitoring_demo.py     # Monitoring engine demo (no API server needed)
+│   └── failure_recovery_demo.py   # Loopback HTTP failure/recovery sequence
+├── docs/
+│   ├── images/
+│   │   ├── grafana-overview.png
+│   │   └── prometheus-targets.png
+│   └── PRODUCTION_READINESS.md
+├── Dockerfile                     # python:3.12-slim, non-root infrawatch user
+├── docker-compose.yml             # api + prometheus + grafana; recovery-worker on profile
+├── requirements.txt
+└── .env.example                   # Safe development defaults
 ```
 
-Provisioning files are version-controlled at:
+---
 
-- Datasource: [`config/grafana/provisioning/datasources/prometheus.yml`](config/grafana/provisioning/datasources/prometheus.yml)
-- Dashboard provider: [`config/grafana/provisioning/dashboards/infrawatch.yml`](config/grafana/provisioning/dashboards/infrawatch.yml)
-- Dashboard JSON: [`config/grafana/dashboards/infrawatch-overview.json`](config/grafana/dashboards/infrawatch-overview.json)
+## Prerequisites
 
-Set local Grafana credentials before starting the stack:
+| Requirement | Notes |
+|---|---|
+| Python 3.9+ | 3.12 recommended (used in Docker image) |
+| Docker Desktop | Required for Compose stack; includes Compose v2 |
+| Git | — |
+| Ansible Core 2.15+ | Only needed for Ansible playbooks; install separately from `.venv` |
+
+---
+
+## Local Setup
 
 ```bash
+# Create virtual environment and install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+# Copy environment template
 cp .env.example .env
-# Edit GF_SECURITY_ADMIN_USER and GF_SECURITY_ADMIN_PASSWORD in .env
-docker compose up --build -d
+# Edit .env: set GF_SECURITY_ADMIN_PASSWORD before running the stack
 ```
 
-The values in `.env.example` are development-only placeholders. For local setup, copy the file exactly as shown above; Compose passes `GF_SECURITY_ADMIN_USER` and `GF_SECURITY_ADMIN_PASSWORD` to Grafana. Change the password before any nonlocal deployment. `.env` is excluded from version control and credentials are not embedded in the provisioning files.
-
-Open the dashboard after Grafana is ready, or inspect its health endpoint:
+### Run locally (API only)
 
 ```bash
-open http://127.0.0.1:3000
-curl http://127.0.0.1:3000/api/health
-docker compose logs -f grafana
+source .venv/bin/activate
+uvicorn app.main:app --reload
 ```
 
-If the datasource or dashboard is missing, check `docker compose logs grafana`, confirm that the provisioning mounts exist, and verify Prometheus readiness at `http://127.0.0.1:9090/-/ready`. The dashboard uses the verified InfraWatch metrics including CPU, memory, disk, uptime, service availability and response time, log severity counts, `up`, and Prometheus `ALERTS`. Dashboard JSON and provisioning YAML are structurally validated by pytest; live panels and datasource health remain unverified until the stack is run.
+The API is intended for **local development only**. It has no authentication and must not be exposed publicly.
 
-## Ansible automation
+### Run with Docker Compose (API + Prometheus + Grafana)
 
-Ansible is organized into four roles:
+```bash
+docker compose up --build -d
 
-- `prerequisites`: checks source files and Docker/Compose availability without installing packages.
-- `configuration`: creates the deployment directory and copies only application, Compose, and monitoring configuration. It never copies `.env`, `.venv`, `.git`, tests, or caches.
-- `deployment`: validates Compose and starts services only when explicitly requested.
-- `verification`: checks API liveness, API monitoring status, Prometheus readiness, and Grafana readiness with bounded retries.
+# Follow logs
+docker compose logs -f api
+docker compose logs -f grafana
 
-The default inventory at [`ansible/inventory/local.yml`](ansible/inventory/local.yml) targets only `127.0.0.1` using a local connection with privilege escalation disabled. The safe `site.yml` playbook validates project prerequisites without starting services:
+# Check service health
+docker compose ps
+
+# Stop and remove containers
+docker compose down
+```
+
+Services are published on loopback (`127.0.0.1`) only:
+
+| Service | Local URL |
+|---|---|
+| InfraWatch API | `http://127.0.0.1:8000` |
+| Prometheus | `http://127.0.0.1:9090` |
+| Grafana | `http://127.0.0.1:3000` |
+
+### Run demos
+
+```bash
+# Monitoring engine demo — no API server required
+# (will report UNHEALTHY because the local service is not running)
+source .venv/bin/activate
+python -m scripts.run_monitoring_demo \
+    --config config/services.yaml \
+    --log tests/fixtures/sample_application.log
+
+# Loopback HTTP failure/recovery sequence — no Docker required
+python -m scripts.failure_recovery_demo
+```
+
+---
+
+## Configuration & Environment Variables
+
+All variables come from `.env`, sourced by Docker Compose. Copy `.env.example` and edit before use.
+
+| Variable | Default | Description |
+|---|---|---|
+| `INFRAWATCH_SERVICES_CONFIG` | `config/services.yaml` | Path to service definitions YAML |
+| `INFRAWATCH_LOG_PATH` | `logs/app.log` | Log file to parse (absence is reported, not fatal) |
+| `INFRAWATCH_DISK_PATH` | `/` | Filesystem path for disk-usage metrics |
+| `INFRAWATCH_CPU_INTERVAL` | `0.1` | `psutil.cpu_percent` blocking interval in seconds |
+| `INFRAWATCH_BIND_ADDRESS` | `127.0.0.1` | Host-binding address for Compose port mappings |
+| `INFRAWATCH_API_PORT` | `8000` | Published API port |
+| `INFRAWATCH_PROMETHEUS_PORT` | `9090` | Published Prometheus port |
+| `INFRAWATCH_GRAFANA_PORT` | `3000` | Published Grafana port |
+| `GF_SECURITY_ADMIN_USER` | `admin` | Grafana admin username |
+| `GF_SECURITY_ADMIN_PASSWORD` | `change-me-local-only` | **Change before any non-local use** |
+| `INFRAWATCH_RECOVERY_DRY_RUN` | `true` | `true` = log recovery intent only; no action executed |
+| `INFRAWATCH_DOCKER_RECOVERY_ENABLED` | `false` | Enable Docker SDK restart handler |
+| `INFRAWATCH_RECOVERY_ALLOWED_CONTAINERS` | _(empty)_ | Comma-separated container names eligible for restart |
+| `INFRAWATCH_RECOVERY_WORKER_URL` | `http://recovery-worker:8090` | Internal URL of the recovery-worker sidecar |
+| `INFRAWATCH_RECOVERY_WORKER_TOKEN` | _(empty)_ | Shared token for worker authentication (min 16 chars) |
+
+Service definitions live in [`config/services.yaml`](config/services.yaml). Add entries under `services` with `name`, `url`, and optional `required`, `timeout_seconds`, `expected_status_codes`, and `recovery` fields. Only `http://` and `https://` URLs are supported.
+
+---
+
+## Ansible Deployment
+
+Ansible is used **for deployment only** — it is not part of the runtime monitoring path.
 
 ```bash
 export ANSIBLE_CONFIG=ansible/ansible.cfg
+
+# Syntax check (safe, no side effects)
 ansible-playbook --syntax-check -i ansible/inventory/local.yml ansible/playbooks/site.yml
+
+# Validate prerequisites without starting services
 ansible-playbook -i ansible/inventory/local.yml ansible/playbooks/site.yml
+
+# Dry run (check mode)
+ansible-playbook --check -i ansible/inventory/local.yml ansible/playbooks/site.yml
 ```
 
-`ANSIBLE_CONFIG` is explicit because the project configuration is stored under `ansible/` rather than at the repository root. With Ansible Core 2.15, `roles_path = roles` resolves relative to the loaded `ansible/ansible.cfg`, so the existing roles resolve consistently from the repository root without machine-specific absolute paths.
-
-Use check mode for a dry run where supported:
-
-```bash
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook --check -i ansible/inventory/local.yml ansible/playbooks/site.yml
-```
-
-Deployment is a separate, explicit operation. It requires Docker, Docker Compose, and a separately managed `.env` in the deployment directory:
+**Deploy to an isolated local directory** (uses ports 18000/19090/13000 to avoid collisions with the main stack):
 
 ```bash
 mkdir -p /tmp/infrawatch
 cp .env.example /tmp/infrawatch/.env
-# Edit /tmp/infrawatch/.env and replace development credentials.
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/inventory/local.yml ansible/playbooks/deploy.yml \
-	-e infrawatch_deploy_dir=/tmp/infrawatch
+# Edit /tmp/infrawatch/.env — replace all placeholder credentials
+
+ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
+    -i ansible/inventory/local.yml ansible/playbooks/deploy.yml \
+    -e infrawatch_deploy_dir=/tmp/infrawatch
+
+# Verify the isolated deployment
+ansible-playbook -i ansible/inventory/local.yml ansible/playbooks/verify.yml
+
+# Clean up the isolated deployment
+COMPOSE_PROJECT_NAME=infrawatch-ansible-local \
+    docker compose -f /tmp/infrawatch/docker-compose.yml down
 ```
 
-The deploy playbook uses the explicit Compose project name `infrawatch-ansible-local` and loopback ports `18000` (API), `19090` (Prometheus), and `13000` (Grafana), so it does not collide with the normal stack on `8000`, `9090`, and `3000`. It affects only `/tmp/infrawatch`, the three isolated containers, and project-scoped named volumes for that Compose project. It does not overwrite the repository `.env` or the existing stack's volumes. The isolated deployment can be removed after verification with:
+Files copied by the `configuration` role: `app/`, `config/`, `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `.env.example`. The `.env`, `.venv`, `.git`, tests, and caches are **never** copied.
+
+> Ansible is not installed in the development virtual environment. Syntax checks are documented but not locally verified. See [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md) for remote-host inventory setup.
+
+---
+
+## Testing & Validation
 
 ```bash
-COMPOSE_PROJECT_NAME=infrawatch-ansible-local docker compose -f /tmp/infrawatch/docker-compose.yml down
-```
-
-The source files copied by configuration management are `app/`, `config/`, `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `.env.example`, and `/tmp/infrawatch/logs`. No `.env`, `.venv`, `.git`, tests, caches, or host-wide settings are copied.
-
-Run verification against an already running target without starting services:
-
-```bash
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/inventory/local.yml ansible/playbooks/verify.yml
-```
-
-For a separate Linux host, create a separate inventory file rather than changing the safe local default. Set an explicit `ansible_host`, `ansible_user`, and connection method, then pass that inventory with `-i`; enable `ansible_become` only when the target's documented permissions require it. Keep SSH keys and credentials outside the repository.
-
-The deployment target, deployment directory, service-start flag, build flag, and verification URLs are variables. `site.yml` has `infrawatch_start_services: false`; only `deploy.yml` enables startup. If Docker is missing, validation reports that deployment was not attempted, while `deploy.yml` fails with a clear prerequisite error. Ansible is not installed in the current development environment, so syntax checks are documented but not locally verified.
-
-## Alert validation and failure recovery
-
-The alert rules in [`config/alerts/infra_rules.yml`](config/alerts/infra_rules.yml) are evaluated every 15 seconds:
-
-- `InfraWatchAPITargetUnavailable`: `up{job="infrawatch-api"} == 0` for 2 minutes; critical.
-- `InfraWatchRequiredServiceDown`: required service availability equals zero for 2 minutes; critical. Optional services do not match this rule.
-- `InfraWatchHighCPUUtilization`: CPU is strictly greater than 85 percent for 5 minutes; warning.
-- `InfraWatchHighMemoryUtilization`: memory is strictly greater than 85 percent for 5 minutes; warning.
-- `InfraWatchHighDiskUtilization`: disk is strictly greater than 85 percent for 5 minutes; warning.
-
-Run the safe local failure-and-recovery demonstration without Docker or external services:
-
-```bash
+# Full test suite
 source .venv/bin/activate
-python -m scripts.failure_recovery_demo
+python -m pytest -q
+
+# Individual test files
+python -m pytest tests/test_recovery.py -q          # Recovery policy and dry-run
+python -m pytest tests/test_docker_recovery.py -q   # Docker restart handler (requires Docker)
+python -m pytest tests/test_api.py -q               # FastAPI endpoint tests
+python -m pytest tests/test_alert_rules.py -q       # Prometheus rule structural tests
+python -m pytest tests/test_grafana_config.py -q    # Grafana provisioning structural tests
+python -m pytest tests/test_ansible_config.py -q    # Ansible YAML structural tests
 ```
 
-The harness binds an ephemeral loopback port, checks a healthy response, changes only its own response to HTTP 503, verifies `DOWN`, restores HTTP 200, verifies `UP`, and cleans up the server automatically. The same sequence is covered by `tests/test_failure_recovery.py`.
+**Validation results (local run):**
 
-Inspect live alert state when Prometheus is running:
-
-```bash
-curl http://127.0.0.1:9090/api/v1/alerts
-curl http://127.0.0.1:9090/api/v1/rules
+```
+76 passed in 9.67s
 ```
 
-The Grafana dashboard's `Active Prometheus Alerts` panel queries the Prometheus-generated `ALERTS{alertstate="firing"}` series. A recovered condition stops matching its alert expression, so Prometheus resolves it after the next evaluation; the `for` delay applies again if the condition returns.
+Test coverage includes:
 
-The tests perform three distinct levels of validation: YAML/JSON structural checks, deterministic synthetic evaluation of the known rule shapes including pending/firing/resolved transitions, and the local HTTP failure/recovery sequence. These tests do not claim full PromQL evaluation or live alert ingestion. `promtool` and Docker runtime checks require those tools and a running stack.
+| Scope | What is tested |
+|---|---|
+| Unit | System metrics collector, service checker, log parser, health monitor, recovery manager |
+| Integration | FastAPI endpoints via `httpx`, coordinator report structure |
+| Structural | YAML/JSON parsing of Prometheus config, alert rules, Grafana provisioning, Ansible playbooks |
+| Behavioural | Alert pending/firing/resolved state transitions (synthetic), YAML rule shape validation |
+| Loopback HTTP | Failure-and-recovery sequence: UP → 503 → DOWN → 200 → UP against an ephemeral loopback server |
+| Docker recovery | Disposable container restart via allowlisted SDK handler (requires Docker) |
 
-## Final integration audit
+**Not verified by tests:** Docker image build, live Compose startup, Prometheus scrape ingestion, Grafana datasource loading, Ansible playbook execution.
 
-The repository integration checklist is:
+---
 
-- [x] FastAPI configuration paths match Compose paths under `/app`.
-- [x] Prometheus scrapes `api:8000/metrics` and loads the mounted alert rules.
-- [x] Grafana uses the internal `http://prometheus:9090` datasource and provisioned dashboard paths.
-- [x] Dashboard, alert, and recording-rule expressions reference exported or Prometheus-generated metrics.
-- [x] Ansible deployment paths match the Compose project layout and verification URLs match `/health`, `/status`, `/-/ready`, and `/api/health`.
-- [x] Required service failures propagate to the health report and serialized service URLs redact credentials and query tokens.
-- [x] Loopback-only host bindings, non-root API execution, read-only configuration mounts, and absence of Docker socket access are structurally checked.
+## Security Considerations & Limitations
 
-Validation status:
+- **No authentication.** The API has no access controls. Do not expose it publicly.
+- **Loopback-only bindings.** All Compose ports bind to `127.0.0.1` by default via `INFRAWATCH_BIND_ADDRESS`.
+- **Non-root container.** The `infrawatch` system user runs the API process; no `root` or `sudo` inside the container.
+- **No Docker socket in the API container.** Docker restart capability requires explicitly starting the opt-in `recovery-worker` sidecar (`docker compose --profile recovery up`).
+- **Recovery is dry-run by default.** `INFRAWATCH_RECOVERY_DRY_RUN=true` until all three gates are set explicitly: `DRY_RUN=false`, `DOCKER_RECOVERY_ENABLED=true`, and a non-empty `ALLOWED_CONTAINERS` list.
+- **No shell execution.** Recovery handlers are injected Python callables — not shell commands or executable paths.
+- **Credential redaction.** `ServiceHealth.to_dict()` strips userinfo and query strings from service URLs before including them in API responses or logs.
+- **Recovery worker token validation.** The sidecar rejects tokens shorter than 16 characters or matching known placeholder prefixes.
+- **No secret management.** Credentials live in `.env` (excluded from version control). Production deployments require a secrets manager or environment injection.
+- **No TLS.** All inter-service communication is plain HTTP on the private Compose network. External TLS termination is required for any production exposure.
+- **No external alert delivery.** Alertmanager is not configured. Prometheus alert rules fire internally but no notifications are sent.
 
-- Unit and integration tests: `python -m pytest -q` passes locally.
-- Static configuration: YAML and JSON parsing plus structural tests pass locally.
-- Runtime verified: the in-process API tests and loopback failure/recovery harness run successfully without external services.
-- Runtime not verified: Docker image/Compose startup, Prometheus ingestion and alert evaluation, Grafana datasource/dashboard loading, and Ansible playbook execution require tools unavailable in the current environment.
+For full production hardening requirements, see [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md).
 
-This project is suitable as a GitHub portfolio demonstration of modular Python monitoring, a FastAPI integration, Prometheus/Grafana configuration, deterministic failure testing, and safe Ansible deployment scaffolding. It remains intentionally local-development focused: authentication, external notification delivery, production secret management, and remote deployment hardening are not implemented.
+---
 
-## Run tests
+## Future Improvements
 
-```bash
-python -m pytest
-```
-
-## Monitoring engine
-
-The monitoring engine is independent of FastAPI and can be called directly:
-
-- `app/monitoring/system_metrics.py` collects CPU, memory, disk, and uptime metrics with `psutil`. The disk path and CPU sampling interval are configurable.
-- `app/monitoring/service_checker.py` checks configured HTTP and HTTPS services with bounded timeouts using Python's standard library. Each service is checked independently.
-- `app/log_parser/log_parser.py` reads a bounded window of a configured log file and counts recognized severity levels without executing file contents.
-- `app/monitoring/health_monitor.py` combines those results. Required service failures and system collection failures are `UNHEALTHY`; optional service failures, log read failures, and configured warning conditions are `DEGRADED`.
-
-Service definitions live in [`config/services.yaml`](config/services.yaml). The included endpoint is a local example only; it is not assumed to be running. Add services under `services` and configure `required`, `timeout_seconds`, and `expected_status_codes` as needed.
-
-Run a local demonstration without starting the API server:
-
-```bash
-source .venv/bin/activate
-python -m scripts.run_monitoring_demo \
-	--config config/services.yaml \
-	--log tests/fixtures/sample_application.log
-```
-
-Because the sample service points at `127.0.0.1:8000` and the FastAPI server is intentionally not started in this step, this demonstration normally reports `UNHEALTHY`. That result confirms the engine distinguishes an unavailable required service from a successful check.
-
-The test log at [`tests/fixtures/sample_application.log`](tests/fixtures/sample_application.log) is synthetic test data, not a real system log. The parser reads at most 1,000 lines by default, so large files do not load entirely into memory.
-
-The monitoring engine, local FastAPI routes, Prometheus configuration, Grafana provisioning, and Ansible scaffolding do not configure external alert delivery. That integration is reserved for a later step.
-
-For deployment security, secret handling, recovery isolation, TLS, firewall, backup, and VPS readiness requirements, see [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md).
-
-## Safe service recovery
-
-Service monitoring and recovery are separate. A failed health check is reported normally; recovery is attempted only when that service has an explicit policy with `enabled: true` and a named action. The default configuration keeps recovery disabled:
-
-```yaml
-recovery:
-	enabled: false
-	action: none
-	max_attempts: 1
-	cooldown_seconds: 300
-	timeout_seconds: 5
-```
-
-Recovery actions are not shell commands. The `action` value selects a handler registered by trusted application code; arbitrary executables, command strings, API input, and untrusted configuration cannot create actions. The built-in API monitor uses dry-run recovery, so normal monitoring never restarts a host process or container. A real restart handler must be explicitly injected by a later deployment integration.
-
-Every action is bounded by a timeout, retry limit, and cooldown. Results are included in the coordinator report under `recoveries` and logged with service, action, status, attempt, and message fields. Recovery exceptions are isolated from monitoring collection.
-
-Run the recovery tests without Docker or external services:
-
-```bash
-.venv/bin/python -m pytest -q tests/test_recovery.py
-```
-
-The suite covers successful and failed handlers, retry limits, cooldowns, disabled recovery, dry-run behavior, and recovery of a disposable loopback-only HTTP service. It does not restart the existing API, Prometheus, or Grafana containers.
-
-### Docker recovery handler
-
-The optional `DockerContainerRestartHandler` uses the Docker Engine API through the Python Docker SDK. It does not invoke a shell or accept command strings. It can restart only an exact container name present in the trusted `INFRAWATCH_RECOVERY_ALLOWED_CONTAINERS` allowlist and only when all of these gates are explicit:
-
-```env
-INFRAWATCH_RECOVERY_DRY_RUN=false
-INFRAWATCH_DOCKER_RECOVERY_ENABLED=true
-INFRAWATCH_RECOVERY_ALLOWED_CONTAINERS=infrawatch-recovery-disposable
-```
-
-The API defaults remain `dry_run=true` and Docker recovery disabled. Docker socket access is a high-privilege control-plane capability: anyone able to use it can control the Docker host. The existing API Compose service does not mount `/var/run/docker.sock`, so the handler is not available inside the production API container by default. Use the handler only from a separately trusted local/deployment process, with a dedicated disposable or explicitly authorized target. Do not add a Docker socket mount to the API casually.
-
-Run the Docker handler tests:
-
-```bash
-.venv/bin/python -m pytest -q tests/test_docker_recovery.py
-```
-
-The runtime test creates one disposable container with an unused loopback port (`18081`), stops it, restarts it through the allowlisted SDK handler, verifies HTTP recovery, and removes it in `finally`. It does not touch the existing Compose project or its volumes.
+- Alertmanager integration for email, Slack, or PagerDuty notifications
+- Authentication layer (API keys or OAuth2) on the FastAPI endpoints
+- TLS termination for inter-service and external traffic
+- Multi-host Ansible inventory support with SSH key management
+- Production secret management (HashiCorp Vault, AWS Secrets Manager)
+- Prometheus remote-write or long-term storage backend
+- Parallel service checks using `asyncio` or `ThreadPoolExecutor`
+- Structured JSON logging with configurable log-level filtering
+- Container image signing and supply-chain hardening
